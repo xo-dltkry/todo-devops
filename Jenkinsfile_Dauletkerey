@@ -17,7 +17,7 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                bat 'docker build -t dauletkerey/todo-app:1.0 .'
+                bat 'docker build -f Dockerfile_Dauletkerey -t dauletkerey/todo-app:1.0 .'
             }
         }
 
@@ -36,6 +36,5 @@ pipeline {
                 bat 'docker push dauletkerey/todo-app:1.0'
             }
         }
-
     }
 }

@@ -5,34 +5,37 @@ pipeline {
 
         stage('Build') {
             steps {
-                sh 'mvn clean package'
+                bat 'mvn clean package'
             }
         }
 
         stage('Test') {
             steps {
-                sh 'mvn test'
+                bat 'mvn test'
             }
         }
 
         stage('Docker Build') {
             steps {
-                sh 'docker build -t dauletkerey/todo-app:1.0 .'
+                bat 'docker build -t dauletkerey/todo-app:1.0 .'
             }
         }
 
         stage('Docker Login') {
             steps {
                 withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
-                    sh 'echo $PASS | docker login -u $USER --password-stdin'
+                    bat """
+                    echo %PASS% | docker login -u %USER% --password-stdin
+                    """
                 }
             }
         }
 
         stage('Push to Docker Hub') {
             steps {
-                sh 'docker push dauletkerey/todo-app:1.0'
+                bat 'docker push dauletkerey/todo-app:1.0'
             }
         }
+
     }
 }

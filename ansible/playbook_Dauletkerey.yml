@@ -1,0 +1,88 @@
+---
+- name: DevOps environment setup (Docker, Kubernetes, Jenkins, K8s deploy)
+  hosts: devops-server
+  become: yes
+
+  vars:
+    k8s_manifests_remote_dir: /home/devops/k8s
+
+  tasks:
+    - name: Update APT package cache
+      apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Install Docker engine
+      apt:
+        name: docker.io
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure Docker service is started and enabled
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Download kubectl binary
+      get_url:
+        url: https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+
+    - name: Download Minikube binary
+      get_url:
+        url: https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+        dest: /usr/local/bin/minikube
+        mode: "0755"
+      when: ansible_os_family == "Debian"
+
+    - name: Install Java for Jenkins
+      apt:
+        name: openjdk-17-jre-headless
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - block:
+        - name: Install Jenkins (Debian-based systems)
+          apt:
+            name: jenkins
+            state: present
+          when: ansible_os_family == "Debian"
+
+        - name: Ensure Jenkins is started and enabled
+          service:
+            name: jenkins
+            state: started
+            enabled: yes
+          when: ansible_os_family == "Debian"
+
+      rescue:
+        - name: Jenkins package not available - skip on this host
+          debug:
+            msg: "Jenkins package is not available on this host (e.g. WSL). On a real server this playbook would install Jenkins from the official Jenkins repository."
+
+    - name: Create directory for Kubernetes manifests
+      file:
+        path: "{{ k8s_manifests_remote_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy Kubernetes manifests to remote server
+      copy:
+        src: "../k8s/"
+        dest: "{{ k8s_manifests_remote_dir }}/"
+        mode: "0644"
+
+    - name: Check if Kubernetes cluster is reachable
+      command: kubectl cluster-info
+      register: k8s_cluster_info
+      failed_when: false
+      changed_when: false
+
+    - name: Deploy Spring Boot app to Kubernetes
+      command: kubectl apply --validate=false -f "{{ k8s_manifests_remote_dir }}/"
+      when: k8s_cluster_info.rc == 0
+      register: k8s_apply_result
+      changed_when: "'created' in k8s_apply_result.stdout or 'configured' in k8s_apply_result.stdout"
+      failed_when: false

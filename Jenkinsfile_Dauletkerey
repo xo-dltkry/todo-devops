@@ -1,85 +1,98 @@
 pipeline {
   agent any
 
-  environment {
-    APP_DIR = "/opt/devops-project/app"
-    DOCKERFILE = "Dockerfile_Dauletkerey"
-    COMPOSE_FILE = "docker-compose_Dauletkerey.yml"
-
-    DOCKER_REGISTRY = "jenkins"                 // например: "registry.gitlab.com"
-    IMAGE_NAME = "tg/todo-app"  // поменяй под себя
-    DOCKER_CREDS = "docker-registry-creds-id"
-    GIT_CREDS = "git-creds-id"           // если не нужно - можно удалить из checkout
-  }
-
   options {
     timestamps()
     disableConcurrentBuilds()
   }
 
-  stages {
+  environment {
+    // ✅ твой путь проекта в VM
+    APP_DIR    = '.'
 
+    // ✅ твои кастомные имена файлов
+    DOCKERFILE = 'Dockerfile_Dauletkerey'
+    COMPOSE    = 'docker-compose_Dauletkerey.yml'
+
+    // ✅ твой Docker image (Docker Hub)
+    IMAGE_REPO = 'tg/todo-app'
+
+    // ✅ Jenkins Credentials ID для Docker registry (DockerHub)
+    REG_CREDS  = 'dockerhub-creds'
+
+    // ❌ не нужен в твоём проекте (оставляем пустым, но не используем ниже)
+    PG_ENV_ID  = ''
+  }
+
+  stages {
     stage('Checkout') {
       steps {
-        checkout([$class: 'GitSCM',
-          branches: [[name: '*/main']],
-          userRemoteConfigs: [[
-            url: scm.userRemoteConfigs[0].url,
-            credentialsId: env.GIT_CREDS
-          ]]
-        ])
-      }
-    }
-
-    stage('Build (Maven)') {
-      steps {
-        dir("${APP_DIR}") {
-          sh 'mvn -B clean package -DskipTests'
+        checkout scm
+        script {
+          def sha = sh(returnStdout: true, script: 'git rev-parse --short=7 HEAD').trim()
+          def b   = (env.BRANCH_NAME ?: 'manual').replaceAll('[^A-Za-z0-9_.-]','-')
+          env.IMAGE_TAG = "${b}-${env.BUILD_NUMBER}-${sha}"
+          env.APP_IMAGE = "${env.IMAGE_REPO}:${env.IMAGE_TAG}"
+          env.REG_HOST  = ''   // ✅ DockerHub: логин без host
         }
       }
     }
 
-    stage('Test (Maven)') {
+    stage('Build') {
       steps {
-        dir("${APP_DIR}") {
-          sh 'mvn -B test'
+        dir(env.APP_DIR) {
+          sh '''
+            set -e
+            mvn -B clean package -DskipTests
+          '''
         }
+      }
+    }
+
+    stage('Test') {
+      steps {
+        dir(env.APP_DIR) {
+          sh '''
+            set -e
+            mvn -B test
+          '''
+        }
+        junit allowEmptyResults: true, testResults: "${APP_DIR}/target/surefire-reports/*.xml"
       }
     }
 
     stage('Static Analysis (optional)') {
-      when { expression { fileExists("${APP_DIR}/pom.xml") } }
       steps {
-        dir("${APP_DIR}") {
-          sh 'mvn -B checkstyle:check spotbugs:check || true'
+        dir(env.APP_DIR) {
+          sh '''
+            set -e
+            # ✅ опционально: если плагинов нет — не валим билд
+            mvn -B checkstyle:check spotbugs:check || true
+          '''
         }
       }
     }
 
-    stage('Docker Build') {
+    stage('Docker Build (dynamic tag)') {
       steps {
-        script {
-          def shortCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${shortCommit}"
-          env.FULL_IMAGE = (env.DOCKER_REGISTRY?.trim())
-            ? "${env.DOCKER_REGISTRY}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-            : "${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-        }
-        dir("${APP_DIR}") {
-          sh """
-            docker build -f ${DOCKERFILE} -t ${FULL_IMAGE} .
-          """
+        dir(env.APP_DIR) {
+          sh '''
+            set -e
+            docker build -t "$APP_IMAGE" -f "$DOCKERFILE" .
+          '''
         }
       }
     }
 
     stage('Docker Push') {
       steps {
-        withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDS, usernameVariable: 'DUSER', passwordVariable: 'DPASS')]) {
-          sh """
-            echo "$DPASS" | docker login ${DOCKER_REGISTRY} -u "$DUSER" --password-stdin
-            docker push ${FULL_IMAGE}
-          """
+        withCredentials([usernamePassword(credentialsId: "${REG_CREDS}", usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+          sh '''
+            set -e
+            echo "$REG_PASS" | docker login -u "$REG_USER" --password-stdin
+            docker push "$APP_IMAGE"
+            docker logout
+          '''
         }
       }
     }
@@ -87,30 +100,21 @@ pipeline {
     stage('Deploy (main only)') {
       when { branch 'main' }
       steps {
-        dir("${APP_DIR}") {
-          sh """
-            docker compose -f ${COMPOSE_FILE} pull app || true
-            docker compose -f ${COMPOSE_FILE} up -d
-            docker compose -f ${COMPOSE_FILE} ps
-          """
+        dir(env.APP_DIR) {
+          sh '''
+            set -e
+            # ✅ деплойим именно тот образ, что собрали/запушили
+            APP_TAG="${IMAGE_TAG}" docker compose -f "$COMPOSE" up -d --no-build
+            docker compose -f "$COMPOSE" ps
+          '''
         }
       }
     }
   }
 
   post {
-    success {
-      echo "✅ Pipeline success: ${FULL_IMAGE}"
-    }
-
-    failure {
-      echo "❌ Pipeline FAILED. Check stage logs above."
-    }
-
     always {
-      archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
-
-      junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+      archiveArtifacts artifacts: '**/target/*.jar', allowEmptyArchive: true
     }
   }
 }

@@ -8,7 +8,7 @@ pipeline {
 
   environment {
     // ✅ твой путь проекта в VM
-    APP_DIR    = '.'
+    APP_DIR    = ''
 
     // ✅ твои кастомные имена файлов
     DOCKERFILE = 'Dockerfile_Dauletkerey'
@@ -27,13 +27,40 @@ pipeline {
   stages {
     stage('Checkout') {
       steps {
-        checkout scm
+        sh '''
+          set -e
+
+          # 1) Git настройки против "curl 18 / early EOF"
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+
+          # 2) Чистим рабочую папку (важно)
+          rm -rf .git || true
+
+          # 3) Shallow clone (без всей истории) + ретраи
+          i=1
+          until [ $i -gt 5 ]
+          do
+            echo "Clone attempt $i/5..."
+            git clone --depth 1 --single-branch --branch main "$GIT_URL" .
+            if [ -d ".git" ]; then
+              echo "✅ cloned"
+              break
+            fi
+            i=$((i+1))
+            sleep 5
+          done
+
+          test -d .git
+        '''
+
         script {
           def sha = sh(returnStdout: true, script: 'git rev-parse --short=7 HEAD').trim()
           def b   = (env.BRANCH_NAME ?: 'manual').replaceAll('[^A-Za-z0-9_.-]','-')
           env.IMAGE_TAG = "${b}-${env.BUILD_NUMBER}-${sha}"
           env.APP_IMAGE = "${env.IMAGE_REPO}:${env.IMAGE_TAG}"
-          env.REG_HOST  = ''   // ✅ DockerHub: логин без host
+          env.REG_HOST  = ''
         }
       }
     }

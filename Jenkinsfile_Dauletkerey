@@ -1,41 +1,116 @@
 pipeline {
-    agent any
+  agent any
 
-    stages {
+  environment {
+    APP_DIR = "/opt/devops-project/app"
+    DOCKERFILE = "Dockerfile_Dauletkerey"
+    COMPOSE_FILE = "docker-compose_Dauletkerey.yml"
 
-        stage('Build') {
-            steps {
-                bat 'mvn clean package'
-            }
-        }
+    DOCKER_REGISTRY = "jenkins"                 // например: "registry.gitlab.com"
+    IMAGE_NAME = "tg/todo-app"  // поменяй под себя
+    DOCKER_CREDS = "docker-registry-creds-id"
+    GIT_CREDS = "git-creds-id"           // если не нужно - можно удалить из checkout
+  }
 
-        stage('Test') {
-            steps {
-                bat 'mvn test'
-            }
-        }
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+  }
 
-        stage('Docker Build') {
-            steps {
-                bat 'docker build -f Dockerfile_Dauletkerey -t dauletkerey/todo-app:2.0 .'
-            }
-        }
+  stages {
 
-        stage('Docker Login') {
-            steps {
-                withCredentials([usernamePassword(credentialsId: 'docker-hub', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
-                    bat """
-                    docker logout || echo No previous login
-                    docker login -u %USER% -p %PASS%
-                    """
-                }
-            }
-        }
-
-        stage('Push to Docker Hub') {
-            steps {
-                bat 'docker push dauletkerey/todo-app:2.0'
-            }
-        }
+    stage('Checkout') {
+      steps {
+        checkout([$class: 'GitSCM',
+          branches: [[name: '*/main']],
+          userRemoteConfigs: [[
+            url: scm.userRemoteConfigs[0].url,
+            credentialsId: env.GIT_CREDS
+          ]]
+        ])
+      }
     }
+
+    stage('Build (Maven)') {
+      steps {
+        dir("${APP_DIR}") {
+          sh 'mvn -B clean package -DskipTests'
+        }
+      }
+    }
+
+    stage('Test (Maven)') {
+      steps {
+        dir("${APP_DIR}") {
+          sh 'mvn -B test'
+        }
+      }
+    }
+
+    stage('Static Analysis (optional)') {
+      when { expression { fileExists("${APP_DIR}/pom.xml") } }
+      steps {
+        dir("${APP_DIR}") {
+          sh 'mvn -B checkstyle:check spotbugs:check || true'
+        }
+      }
+    }
+
+    stage('Docker Build') {
+      steps {
+        script {
+          def shortCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${shortCommit}"
+          env.FULL_IMAGE = (env.DOCKER_REGISTRY?.trim())
+            ? "${env.DOCKER_REGISTRY}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+            : "${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+        }
+        dir("${APP_DIR}") {
+          sh """
+            docker build -f ${DOCKERFILE} -t ${FULL_IMAGE} .
+          """
+        }
+      }
+    }
+
+    stage('Docker Push') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: env.DOCKER_CREDS, usernameVariable: 'DUSER', passwordVariable: 'DPASS')]) {
+          sh """
+            echo "$DPASS" | docker login ${DOCKER_REGISTRY} -u "$DUSER" --password-stdin
+            docker push ${FULL_IMAGE}
+          """
+        }
+      }
+    }
+
+    stage('Deploy (main only)') {
+      when { branch 'main' }
+      steps {
+        dir("${APP_DIR}") {
+          sh """
+            docker compose -f ${COMPOSE_FILE} pull app || true
+            docker compose -f ${COMPOSE_FILE} up -d
+            docker compose -f ${COMPOSE_FILE} ps
+          """
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Pipeline success: ${FULL_IMAGE}"
+    }
+
+    failure {
+      echo "❌ Pipeline FAILED. Check stage logs above."
+    }
+
+    always {
+      archiveArtifacts artifacts: '**/target/*.jar', fingerprint: true
+
+      junit allowEmptyResults: true, testResults: '**/target/surefire-reports/*.xml'
+    }
+  }
 }

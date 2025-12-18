@@ -1,17 +1,34 @@
-version: '3'
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: todo-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-todo}
+      POSTGRES_USER: ${POSTGRES_USER:-todo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-todo}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - devops-net
+
   app:
-    image: tg/todo-app:2.0
-    ports:
-      - "8080:8080"
+    image: tg/todo-app:1.1
+    container_name: todo-app
     depends_on:
       - db
-
-  db:
-    image: postgres:15
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: dekiru
-      POSTGRES_DB: todo
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-todo}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-todo}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-todo}
+      SERVER_PORT: 8081
     ports:
-      - "5432:5432"
+      - "8081:8081"
+    networks:
+      - devops-net
+
+volumes:
+  pgdata:
+
+networks:
+  devops-net:
+    driver: bridge

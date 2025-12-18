@@ -1,123 +1,99 @@
 pipeline {
   agent any
 
+  environment {
+    DOCKERHUB_USER = "dauletkerey"
+    IMAGE_NAME     = "devops-app"
+  }
+
   options {
     timestamps()
     disableConcurrentBuilds()
   }
 
-  environment {
-    // ✅ твой путь проекта в VM
-    APP_DIR    = ''
-
-    // ✅ твои кастомные имена файлов
-    DOCKERFILE = 'Dockerfile_Dauletkerey'
-    COMPOSE    = 'docker-compose_Dauletkerey.yml'
-
-    // ✅ твой Docker image (Docker Hub)
-    IMAGE_REPO = 'tg/todo-app'
-
-    // ✅ Jenkins Credentials ID для Docker registry (DockerHub)
-    REG_CREDS  = 'dockerhub-creds'
-
-    // ❌ не нужен в твоём проекте (оставляем пустым, но не используем ниже)
-    PG_ENV_ID  = ''
-  }
-
   stages {
     stage('Checkout') {
       steps {
-        sh '''
-          set -e
+        checkout scm
+        sh 'git rev-parse --short HEAD'
+      }
+    }
 
-          # 1) Git настройки против "curl 18 / early EOF"
-          git config --global http.version HTTP/1.1
-          git config --global http.postBuffer 524288000
-          git config --global core.compression 0
-
-          # 2) Чистим рабочую папку (важно)
-          rm -rf .git || true
-
-          # 3) Shallow clone (без всей истории) + ретраи
-          i=1
-          until [ $i -gt 5 ]
-          do
-            echo "Clone attempt $i/5..."
-            git clone --depth 1 --single-branch --branch main "$GIT_URL" .
-            if [ -d ".git" ]; then
-              echo "✅ cloned"
-              break
-            fi
-            i=$((i+1))
-            sleep 5
-          done
-
-          test -d .git
-        '''
-
+    stage('Prepare Vars') {
+      steps {
         script {
-          def sha = sh(returnStdout: true, script: 'git rev-parse --short=7 HEAD').trim()
-          def b   = (env.BRANCH_NAME ?: 'manual').replaceAll('[^A-Za-z0-9_.-]','-')
-          env.IMAGE_TAG = "${b}-${env.BUILD_NUMBER}-${sha}"
-          env.APP_IMAGE = "${env.IMAGE_REPO}:${env.IMAGE_TAG}"
-          env.REG_HOST  = ''
+          env.SHORT_COMMIT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          env.IMAGE_TAG    = "build-${env.BUILD_NUMBER}-${env.SHORT_COMMIT}"
+          env.FULL_IMAGE   = "${env.DOCKERHUB_USER}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
+          env.LATEST_IMAGE = "${env.DOCKERHUB_USER}/${env.IMAGE_NAME}:latest"
+        }
+        sh '''
+          echo "SHORT_COMMIT=$SHORT_COMMIT"
+          echo "IMAGE_TAG=$IMAGE_TAG"
+          echo "FULL_IMAGE=$FULL_IMAGE"
+          echo "LATEST_IMAGE=$LATEST_IMAGE"
+        '''
+      }
+    }
+
+    stage('Build (Maven)') {
+      steps {
+        sh 'mvn -B -U clean package -DskipTests'
+      }
+      post {
+        success {
+          archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
         }
       }
     }
 
-    stage('Build') {
+    stage('Test (Maven)') {
       steps {
-        dir(env.APP_DIR) {
-          sh '''
-            set -e
-            mvn -B clean package -DskipTests
-          '''
-        }
+        sh 'mvn -B test'
       }
-    }
-
-    stage('Test') {
-      steps {
-        dir(env.APP_DIR) {
-          sh '''
-            set -e
-            mvn -B test
-          '''
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
         }
-        junit allowEmptyResults: true, testResults: "${APP_DIR}/target/surefire-reports/*.xml"
       }
     }
 
     stage('Static Analysis (optional)') {
       steps {
-        dir(env.APP_DIR) {
-          sh '''
-            set -e
-            # ✅ опционально: если плагинов нет — не валим билд
-            mvn -B checkstyle:check spotbugs:check || true
-          '''
-        }
+        sh '''
+          set +e
+          mvn -B checkstyle:check spotbugs:check
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Static analysis not passed or plugins missing (optional)."
+          fi
+          exit 0
+        '''
       }
     }
 
-    stage('Docker Build (dynamic tag)') {
+    stage('Docker Build') {
       steps {
-        dir(env.APP_DIR) {
-          sh '''
-            set -e
-            docker build -t "$APP_IMAGE" -f "$DOCKERFILE" .
-          '''
-        }
+        sh '''
+          set -e
+          docker build -f Dockerfile_Dauletkerey -t "$FULL_IMAGE" .
+          docker tag "$FULL_IMAGE" "$LATEST_IMAGE"
+        '''
       }
     }
 
     stage('Docker Push') {
       steps {
-        withCredentials([usernamePassword(credentialsId: "${REG_CREDS}", usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+        withCredentials([usernamePassword(
+          credentialsId: 'dockerhub-creds',
+          usernameVariable: 'DUSER',
+          passwordVariable: 'DPASS'
+        )]) {
           sh '''
             set -e
-            echo "$REG_PASS" | docker login -u "$REG_USER" --password-stdin
-            docker push "$APP_IMAGE"
+            echo "$DPASS" | docker login -u "$DUSER" --password-stdin
+            docker push "$FULL_IMAGE"
+            docker push "$LATEST_IMAGE"
             docker logout
           '''
         }
@@ -125,23 +101,29 @@ pipeline {
     }
 
     stage('Deploy (main only)') {
-      when { branch 'main' }
+      when {
+        branch 'main'
+      }
       steps {
-        dir(env.APP_DIR) {
-          sh '''
-            set -e
-            # ✅ деплойим именно тот образ, что собрали/запушили
-            APP_TAG="${IMAGE_TAG}" docker compose -f "$COMPOSE" up -d --no-build
-            docker compose -f "$COMPOSE" ps
-          '''
-        }
+        sh '''
+          set -e
+          docker compose -f docker-compose_Dauletkerey.yml pull app
+          docker compose -f docker-compose_Dauletkerey.yml up -d
+          docker compose -f docker-compose_Dauletkerey.yml ps
+        '''
       }
     }
   }
 
   post {
+    success {
+      echo "✅ Pipeline SUCCESS: ${env.FULL_IMAGE}"
+    }
+    failure {
+      echo "❌ Pipeline FAILED. Check console output."
+    }
     always {
-      archiveArtifacts artifacts: '**/target/*.jar', allowEmptyArchive: true
+      sh 'docker image prune -f || true'
     }
   }
 }

@@ -12,7 +12,7 @@ services:
       - devops-net
 
   app:
-    image: dauletkerey/devops-app:${APP_TAG:-latest}
+    image: tg/todo-app:${APP_TAG:-latest}
     container_name: todo-app
     depends_on:
       - db

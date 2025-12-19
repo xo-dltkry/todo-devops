@@ -1,129 +1,160 @@
 pipeline {
   agent any
 
-  environment {
-    DOCKERHUB_USER = "dauletkerey"
-    IMAGE_NAME     = "devops-app"
-  }
-
   options {
     timestamps()
     disableConcurrentBuilds()
   }
 
+  environment {
+    // ====== НАСТРОЙ ПОД СЕБЯ ======
+    DOCKER_REGISTRY = "docker.io"
+    DOCKER_REPO     = "dauletkerey/devops-app"  // например: dauletkerey/todo-app
+    DOCKER_CREDS_ID = "dockerhub-creds"
+
+    // Maven
+    MAVEN_OPTS = "-Dmaven.repo.local=.m2/repository"
+
+    // (Опционально) email (если поставишь Email Extension plugin и настроишь SMTP)
+    // EMAIL_TO = "you@example.com"
+  }
+
   stages {
-    stage('Checkout') {
+
+    stage("Checkout") {
       steps {
         checkout scm
         sh 'git rev-parse --short HEAD'
       }
     }
 
-    stage('Prepare Vars') {
-      steps {
-        script {
-          env.SHORT_COMMIT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
-          env.IMAGE_TAG    = "build-${env.BUILD_NUMBER}-${env.SHORT_COMMIT}"
-          env.FULL_IMAGE   = "${env.DOCKERHUB_USER}/${env.IMAGE_NAME}:${env.IMAGE_TAG}"
-          env.LATEST_IMAGE = "${env.DOCKERHUB_USER}/${env.IMAGE_NAME}:latest"
-        }
-        sh '''
-          echo "SHORT_COMMIT=$SHORT_COMMIT"
-          echo "IMAGE_TAG=$IMAGE_TAG"
-          echo "FULL_IMAGE=$FULL_IMAGE"
-          echo "LATEST_IMAGE=$LATEST_IMAGE"
-        '''
-      }
-    }
-
-    stage('Build (Maven)') {
-      steps {
-        sh 'mvn -B -U clean package -DskipTests'
-      }
-      post {
-        success {
-          archiveArtifacts artifacts: 'target/*.jar', fingerprint: true
-        }
-      }
-    }
-
-    stage('Test (Maven)') {
-      steps {
-        sh 'mvn -B test'
-      }
-      post {
-        always {
-          junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
-        }
-      }
-    }
-
-    stage('Static Analysis (optional)') {
-      steps {
-        sh '''
-          set +e
-          mvn -B checkstyle:check spotbugs:check
-          EXIT_CODE=$?
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "Static analysis not passed or plugins missing (optional)."
-          fi
-          exit 0
-        '''
-      }
-    }
-
-    stage('Docker Build') {
+    stage("Build (Maven)") {
       steps {
         sh '''
           set -e
-          docker build -f Dockerfile_Dauletkerey -t "$FULL_IMAGE" .
-          docker tag "$FULL_IMAGE" "$LATEST_IMAGE"
+          mvn -v
+          mvn -DskipTests=true clean package
         '''
       }
     }
 
-    stage('Docker Push') {
+    stage("Test (Maven)") {
       steps {
-        withCredentials([usernamePassword(
-          credentialsId: 'dockerhub-creds',
-          usernameVariable: 'DUSER',
-          passwordVariable: 'DPASS'
-        )]) {
+        sh '''
+          set -e
+          mvn test
+        '''
+      }
+    }
+
+    stage("Static Analysis (optional)") {
+      when { expression { fileExists("pom.xml") } }
+      steps {
+        sh '''
+          set -e
+          echo "Run Checkstyle/SpotBugs only if configured in pom.xml"
+          # Если в pom.xml настроены плагины checkstyle/spotbugs, эти команды отработают.
+          # Если нет — они могут упасть. Тогда либо добавь плагины, либо закомментируй stage.
+          mvn -DskipTests=true checkstyle:check || true
+          mvn -DskipTests=true spotbugs:check  || true
+        '''
+      }
+    }
+
+    stage("Prepare Docker Tag") {
+      steps {
+        script {
+          def shortCommit = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          def ts = sh(script: "date +%Y%m%d-%H%M%S", returnStdout: true).trim()
+          env.IMAGE_TAG = "${env.BUILD_NUMBER}-${shortCommit}-${ts}"
+          env.FULL_IMAGE = "${env.DOCKER_REPO}:${env.IMAGE_TAG}"
+          echo "IMAGE_TAG=${env.IMAGE_TAG}"
+          echo "FULL_IMAGE=${env.FULL_IMAGE}"
+        }
+      }
+    }
+
+    stage("Docker Build") {
+      steps {
+        sh '''
+          set -e
+          docker version
+          docker build -t "$FULL_IMAGE" .
+        '''
+      }
+    }
+
+    stage("Docker Push") {
+      steps {
+        withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDS_ID}", usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
           sh '''
             set -e
-            echo "$DPASS" | docker login -u "$DUSER" --password-stdin
+            echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
             docker push "$FULL_IMAGE"
-            docker push "$LATEST_IMAGE"
             docker logout
           '''
         }
       }
     }
 
-    stage('Deploy (main only)') {
+    stage("Deploy (main only)") {
       when {
-        branch 'main'
+        branch "main"
       }
       steps {
         sh '''
           set -e
-          docker compose -f docker-compose_Dauletkerey.yml pull app
-          docker compose -f docker-compose_Dauletkerey.yml up -d
-          docker compose -f docker-compose_Dauletkerey.yml ps
+          echo "Deploying only on main..."
+          # Вариант 1 (локально на той же VM): обновить docker-compose
+          # Требование: на сервере должен быть docker-compose.yml, который использует образ.
+          #
+          # Пример:
+          #   services:
+          #     app:
+          #       image: YOUR_DOCKERHUB_LOGIN/YOUR_IMAGE_NAME:latest
+          #
+          # Тогда можно пушить latest дополнительно и делать pull/up.
+          #
+          # --- Простой способ: tag also as latest ---
+          docker tag "$FULL_IMAGE" "$DOCKER_REPO:latest"
+          docker push "$DOCKER_REPO:latest"
+
+          # Если у тебя docker-compose лежит например в /opt/devops-project (поменяй путь):
+          if [ -f /opt/devops-project/docker-compose.yml ]; then
+            cd /opt/devops-project
+            docker compose pull
+            docker compose up -d
+            docker compose ps
+          else
+            echo "No /opt/devops-project/docker-compose.yml found. Skipping compose deploy."
+          fi
         '''
       }
     }
   }
 
   post {
-    success {
-      echo "✅ Pipeline SUCCESS: ${env.FULL_IMAGE}"
-    }
-    failure {
-      echo "❌ Pipeline FAILED. Check console output."
-    }
     always {
-      sh 'docker image prune -f || true'
+      // Артефакты Maven (jar/war)
+      archiveArtifacts artifacts: 'target/*.jar,target/*.war', fingerprint: true
+
+      // Логи + чистка workspace (по желанию)
+      echo "Build finished: ${currentBuild.currentResult}"
+    }
+
+    success {
+      echo "SUCCESS ✅"
+      // Если настроишь Email Extension plugin:
+      // emailext to: "${EMAIL_TO}",
+      //   subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+      //   body: "Image: ${env.FULL_IMAGE}\nBuild URL: ${env.BUILD_URL}"
+    }
+
+    failure {
+      echo "FAILURE ❌"
+      // emailext to: "${EMAIL_TO}",
+      //   subject: "FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+      //   body: "Check console output:\n${env.BUILD_URL}"
     }
   }
 }

@@ -3,5 +3,9 @@ kind: ConfigMap
 metadata:
   name: todo-config
 data:
-  appName: "Todo Application"
-  serverPort: "8080"
+  SERVER_PORT: "8081"
+  SPRING_PROFILES_ACTIVE: "k8s"
+  SPRING_DATASOURCE_URL: "jdbc:h2:mem:testdb"
+  SPRING_DATASOURCE_DRIVER_CLASS_NAME: "org.h2.Driver"
+  SPRING_JPA_DATABASE_PLATFORM: "org.hibernate.dialect.H2Dialect"
+  SPRING_JPA_HIBERNATE_DDL_AUTO: "update"

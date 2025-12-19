@@ -4,27 +4,64 @@ metadata:
   name: todo-app
 spec:
   replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
   selector:
     matchLabels:
-      app: todo
+      app: todo-app
   template:
     metadata:
       labels:
-        app: todo
+        app: todo-app
     spec:
       containers:
         - name: todo-app
-          image: dauletkerey/todo-app:2.1
+          image: tg/todo-app:1.1
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
-          env:
-            - name: APP_NAME
-              valueFrom:
-                configMapKeyRef:
-                  name: todo-config
-                  key: appName
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: todo-secret
-                  key: dbPassword
+            - containerPort: 8081
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          envFrom:
+            - configMapRef:
+                name: todo-config
+            - secretRef:
+                name: todo-secret
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 15
+
+          volumeMounts:
+            - name: config-vol
+              mountPath: /etc/todo-config
+              readOnly: true
+            - name: secret-vol
+              mountPath: /etc/todo-secret
+              readOnly: true
+
+      volumes:
+        - name: config-vol
+          configMap:
+            name: todo-config
+        - name: secret-vol
+          secret:
+            secretName: todo-secret

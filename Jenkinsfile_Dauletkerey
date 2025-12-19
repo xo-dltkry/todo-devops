@@ -23,8 +23,19 @@ pipeline {
 
     stage("Checkout") {
       steps {
-        checkout scm
-        sh 'git rev-parse --short HEAD'
+        retry(3) {
+          checkout([$class: 'GitSCM',
+            branches: [[name: '*/main']],
+            userRemoteConfigs: [[
+              url: 'git@github.com:xo-dltkry/todo-devops.git',
+              credentialsId: 'git-ssh'
+            ]],
+            extensions: [
+              [$class: 'CleanBeforeCheckout'],
+              [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, timeout: 20]
+            ]
+          ])
+        }
       }
     }
 
